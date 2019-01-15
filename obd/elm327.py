@@ -71,8 +71,8 @@ class ELM327:
         "8" : ISO_15765_4_11bit_250k,
         "9" : ISO_15765_4_29bit_250k,
         "A" : SAE_J1939,
-        #"B" : None, # user defined 1
-        #"C" : None, # user defined 2
+        "B" : ISO_15765_4_11bit_250k, # user defined 1
+        "C" : None, # user defined 2
     }
 
     # used as a fallback, when ATSP0 doesn't cut it
