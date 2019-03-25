@@ -56,37 +56,39 @@ class ELM327:
     """
 
     ELM_PROMPT = b'>'
+    ELM_LP_ACTIVE = b'OK'
 
     _SUPPORTED_PROTOCOLS = {
-        #"0" : None, # Automatic Mode. This isn't an actual protocol. If the
-                     # ELM reports this, then we don't have enough
-                     # information. see auto_protocol()
-        "1" : SAE_J1850_PWM,
-        "2" : SAE_J1850_VPW,
-        "3" : ISO_9141_2,
-        "4" : ISO_14230_4_5baud,
-        "5" : ISO_14230_4_fast,
-        "6" : ISO_15765_4_11bit_500k,
-        "7" : ISO_15765_4_29bit_500k,
-        "8" : ISO_15765_4_11bit_250k,
-        "9" : ISO_15765_4_29bit_250k,
-        "A" : SAE_J1939,
+        # "0" : None,
+        # Automatic Mode. This isn't an actual protocol. If the
+        # ELM reports this, then we don't have enough
+        # information. see auto_protocol()
+        "1": SAE_J1850_PWM,
+        "2": SAE_J1850_VPW,
+        "3": ISO_9141_2,
+        "4": ISO_14230_4_5baud,
+        "5": ISO_14230_4_fast,
+        "6": ISO_15765_4_11bit_500k,
+        "7": ISO_15765_4_29bit_500k,
+        "8": ISO_15765_4_11bit_250k,
+        "9": ISO_15765_4_29bit_250k,
+        "A": SAE_J1939,
         "B" : ISO_15765_4_11bit_250k, # user defined 1
         "C" : None, # user defined 2
     }
 
     # used as a fallback, when ATSP0 doesn't cut it
     _TRY_PROTOCOL_ORDER = [
-        "6", # ISO_15765_4_11bit_500k
-        "8", # ISO_15765_4_11bit_250k
-        "1", # SAE_J1850_PWM
-        "7", # ISO_15765_4_29bit_500k
-        "9", # ISO_15765_4_29bit_250k
-        "2", # SAE_J1850_VPW
-        "3", # ISO_9141_2
-        "4", # ISO_14230_4_5baud
-        "5", # ISO_14230_4_fast
-        "A", # SAE_J1939
+        "6",  # ISO_15765_4_11bit_500k
+        "8",  # ISO_15765_4_11bit_250k
+        "1",  # SAE_J1850_PWM
+        "7",  # ISO_15765_4_29bit_500k
+        "9",  # ISO_15765_4_29bit_250k
+        "2",  # SAE_J1850_VPW
+        "3",  # ISO_9141_2
+        "4",  # ISO_14230_4_5baud
+        "5",  # ISO_14230_4_fast
+        "A",  # SAE_J1939
     ]
 
     # 38400, 9600 are the possible boot bauds (unless reprogrammed via
@@ -99,12 +101,10 @@ class ELM327:
     # We check the two default baud rates first, then go fastest to
     # slowest, on the theory that anyone who's using a slow baud rate is
     # going to be less picky about the time required to detect it.
-    _TRY_BAUDS = [ 38400, 9600, 230400, 115200, 57600, 19200 ]
-
-
+    _TRY_BAUDS = [38400, 9600, 230400, 115200, 57600, 19200]
 
     def __init__(self, portname, baudrate, protocol, timeout,
-                 check_voltage=True):
+                 check_voltage=True, start_low_power=False):
         """Initializes port by resetting device and gettings supported PIDs. """
 
         logger.info("Initializing ELM327: PORT=%s BAUD=%s PROTOCOL=%s" %
@@ -114,25 +114,30 @@ class ELM327:
                         "auto" if protocol is None else protocol,
                     ))
 
-        self.__status   = OBDStatus.NOT_CONNECTED
-        self.__port     = None
+        self.__status = OBDStatus.NOT_CONNECTED
+        self.__port = None
         self.__protocol = UnknownProtocol([])
+        self.__low_power = False
         self.timeout = timeout
-
 
         # ------------- open port -------------
         try:
-            self.__port = serial.serial_for_url(portname, \
-                                        parity   = serial.PARITY_NONE, \
-                                        stopbits = 1, \
-                                        bytesize = 8,
-                                        timeout = 10) # seconds
+            self.__port = serial.serial_for_url(portname,
+                                                parity=serial.PARITY_NONE,
+                                                stopbits=1,
+                                                bytesize=8,
+                                                timeout=10)  # seconds
         except serial.SerialException as e:
             self.__error(e)
             return
         except OSError as e:
             self.__error(e)
             return
+
+        # If we start with the IC in the low power state we need to wake it up
+        if start_low_power:
+            self.__write(b" ")
+            time.sleep(1)
 
         # ------------------------ find the ELM's baud ------------------------
 
@@ -142,7 +147,7 @@ class ELM327:
 
         # ---------------------------- ATZ (reset) ----------------------------
         try:
-            self.__send(b"ATZ", delay=1) # wait 1 second for ELM to initialize
+            self.__send(b"ATZ", delay=1)  # wait 1 second for ELM to initialize
             # return data can be junk, so don't bother checking
         except serial.SerialException as e:
             self.__error(e)
@@ -198,33 +203,30 @@ class ELM327:
             if self.__status == OBDStatus.OBD_CONNECTED:
                 logger.error("Adapter connected, but the ignition is off")
             else:
-                logger.error("Connected to the adapter, "\
+                logger.error("Connected to the adapter, "
                              "but failed to connect to the vehicle")
 
-
-    def set_protocol(self, protocol):
-        if protocol is not None:
+    def set_protocol(self, protocol_):
+        if protocol_ is not None:
             # an explicit protocol was specified
-            if protocol not in self._SUPPORTED_PROTOCOLS:
+            if protocol_ not in self._SUPPORTED_PROTOCOLS:
                 logger.error("%s is not a valid protocol. Please use \"1\" through \"A\"")
                 return False
-            return self.manual_protocol(protocol)
+            return self.manual_protocol(protocol_)
         else:
             # auto detect the protocol
             return self.auto_protocol()
 
-
-    def manual_protocol(self, protocol):
-        r = self.__send(b"ATTP" + protocol.encode())
+    def manual_protocol(self, protocol_):
+        r = self.__send(b"ATTP" + protocol_.encode())
         r0100 = self.__send(b"0100")
 
         if not self.__has_message(r0100, "UNABLE TO CONNECT"):
             # success, found the protocol
-            self.__protocol = self._SUPPORTED_PROTOCOLS[protocol](r0100)
+            self.__protocol = self._SUPPORTED_PROTOCOLS[protocol_](r0100)
             return True
 
         return False
-
 
     def auto_protocol(self):
         """
@@ -251,8 +253,7 @@ class ELM327:
             logger.error("Failed to retrieve current protocol")
             return False
 
-
-        p = r[0] # grab the first (and only) line returned
+        p = r[0]  # grab the first (and only) line returned
         # suppress any "automatic" prefix
         p = p[1:] if (len(p) > 1 and p.startswith("A")) else p
 
@@ -279,7 +280,6 @@ class ELM327:
         logger.error("Failed to determine protocol")
         return False
 
-
     def set_baudrate(self, baud):
         if baud is None:
             # when connecting to pseudo terminal, don't bother with auto baud
@@ -292,7 +292,6 @@ class ELM327:
             self.__port.baudrate = baud
             return True
 
-
     def auto_baudrate(self):
         """
         Detect the baud rate at which a connected ELM32x interface is operating.
@@ -301,7 +300,7 @@ class ELM327:
 
         # before we change the timout, save the "normal" value
         timeout = self.__port.timeout
-        self.__port.timeout = self.timeout # we're only talking with the ELM, so things should go quickly
+        self.__port.timeout = self.timeout  # we're only talking with the ELM, so things should go quickly
 
         for baud in self._TRY_BAUDS:
             self.__port.baudrate = baud
@@ -324,15 +323,12 @@ class ELM327:
             # watch for the prompt character
             if response.endswith(b">"):
                 logger.debug("Choosing baud %d" % baud)
-                self.__port.timeout = timeout # reinstate our original timeout
+                self.__port.timeout = timeout  # reinstate our original timeout
                 return True
 
-
         logger.debug("Failed to choose baud")
-        self.__port.timeout = timeout # reinstate our original timeout
+        self.__port.timeout = timeout  # reinstate our original timeout
         return False
-
-
 
     def __isok(self, lines, expectEcho=False):
         if not lines:
@@ -344,19 +340,16 @@ class ELM327:
         else:
             return len(lines) == 1 and lines[0] == 'OK'
 
-
     def __has_message(self, lines, text):
         for line in lines:
             if text in line:
                 return True
         return False
 
-
     def __error(self, msg):
         """ handles fatal failures, print logger.info info and closes serial """
         self.close()
         logger.error(str(msg))
-
 
     def port_name(self):
         if self.__port is not None:
@@ -364,22 +357,73 @@ class ELM327:
         else:
             return ""
 
-
     def status(self):
         return self.__status
-
 
     def ecus(self):
         return self.__protocol.ecu_map.values()
 
-
     def protocol_name(self):
         return self.__protocol.ELM_NAME
-
 
     def protocol_id(self):
         return self.__protocol.ELM_ID
 
+    def low_power(self):
+        """
+            Enter Low Power mode
+
+            This command causes the ELM327 to shut off all but essential
+            services.
+
+            The ELM327 can be woken up by a message to the RS232 bus as
+            well as a few other ways. See the Power Control section in
+            the ELM327 datasheet for details on other ways to wake up
+            the chip.
+
+            Returns the status from the ELM327, 'OK' means low power mode
+            is going to become active.
+        """
+
+        if self.__status == OBDStatus.NOT_CONNECTED:
+            logger.info("cannot enter low power when unconnected")
+            return None
+
+        lines = self.__send(b"ATLP", delay=1)
+
+        if 'OK' in lines:
+            logger.debug("Successfully entered low power mode")
+            self.__low_power = True
+        else:
+            logger.debug("Failed to enter low power mode")
+
+        return lines
+
+    def normal_power(self):
+        """
+            Exit Low Power mode
+
+            Send a space to trigger the RS232 to wakeup.
+
+            This will send a space even if we aren't in low power mode as
+            we want to ensure that we will be able to leave low power mode.
+
+            See the Power Control section in the ELM327 datasheet for details
+            on other ways to wake up the chip.
+
+            Returns the status from the ELM327.
+        """
+        if self.__status == OBDStatus.NOT_CONNECTED:
+            logger.info("cannot exit low power when unconnected")
+            return None
+
+        lines = self.__send(b" ")
+
+        # Assume we woke up
+        logger.debug("Successfully exited low power mode")
+        self.__low_power = False
+
+        return lines
 
     def close(self):
         """
@@ -387,7 +431,7 @@ class ELM327:
             attributes to unconnected states.
         """
 
-        self.__status   = OBDStatus.NOT_CONNECTED
+        self.__status = OBDStatus.NOT_CONNECTED
         self.__protocol = None
 
         if self.__port is not None:
@@ -395,7 +439,6 @@ class ELM327:
             self.__write(b"ATZ")
             self.__port.close()
             self.__port = None
-
 
     def send_and_parse(self, cmd):
         """
@@ -413,10 +456,13 @@ class ELM327:
             logger.info("cannot send_and_parse() when unconnected")
             return None
 
+        # Check if we are in low power
+        if self.__low_power == True:
+            self.normal_power()
+
         lines = self.__send(cmd)
         messages = self.__protocol(lines)
         return messages
-
 
     def __send(self, cmd, delay=None):
         """
@@ -435,19 +481,18 @@ class ELM327:
 
         return self.__read()
 
-
     def __write(self, cmd):
         """
             "low-level" function to write a string to the port
         """
 
         if self.__port:
-            cmd += b"\r" # terminate with carriage return in accordance with ELM327 and STN11XX specifications
+            cmd += b"\r"  # terminate with carriage return in accordance with ELM327 and STN11XX specifications
             logger.debug("write: " + repr(cmd))
             try:
-                self.__port.flushInput() # dump everything in the input buffer
-                self.__port.write(cmd) # turn the string into bytes and write
-                self.__port.flush() # wait for the output buffer to finish transmitting
+                self.__port.flushInput()  # dump everything in the input buffer
+                self.__port.write(cmd)  # turn the string into bytes and write
+                self.__port.flush()  # wait for the output buffer to finish transmitting
             except Exception:
                 self.__status = OBDStatus.NOT_CONNECTED
                 self.__port.close()
@@ -456,7 +501,6 @@ class ELM327:
                 return
         else:
             logger.info("cannot perform __write() when unconnected")
-
 
     def __read(self):
         """
@@ -482,15 +526,16 @@ class ELM327:
                 logger.critical("Device disconnected while reading")
                 return []
 
-            # if nothing was recieved
+            # if nothing was received
             if not data:
                 logger.warning("Failed to read port")
                 break
 
             buffer.extend(data)
 
-            # end on chevron (ELM prompt character)
-            if self.ELM_PROMPT in buffer:
+            # end on chevron (ELM prompt character) or an 'OK' which
+            # indicates we are entering low power state
+            if self.ELM_PROMPT in buffer or self.ELM_LP_ACTIVE in buffer:
                 break
 
         # log, and remove the "bytearray(   ...   )" part
@@ -507,6 +552,6 @@ class ELM327:
         string = buffer.decode("utf-8", "ignore")
 
         # splits into lines while removing empty lines and trailing spaces
-        lines = [ s.strip() for s in re.split("[\r\n]", string) if bool(s) ]
+        lines = [s.strip() for s in re.split("[\r\n]", string) if bool(s)]
 
         return lines
